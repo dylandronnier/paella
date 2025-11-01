@@ -1,0 +1,23 @@
+# python generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# venv
+.venv
+
+# Mlflow
+mlruns/
+*.csv
+*.png
+
+outputs/
+
+# Where data is stored
+data/
+
+# Marimo
+__marimo__/
