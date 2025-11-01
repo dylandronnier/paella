@@ -7,6 +7,6 @@ It serves as a practical example of how to train and deploy ML models efficientl
 In addition to the core components of the `jax-ai-stack`, Paella also integrates:
 
 - 🤗 **[`datasets`](https://huggingface.co/docs/datasets)** — used as the primary source for dataset loading and management,  
-- 🌊🍃 **[`marimo`](https://github.com/marimo-team/marimo)** — for interactive experimentation and exploration through notebooks,  
-- 🤗 **[`safetensors`](https://github.com/huggingface/safetensors)** — for safe and efficient export of trained model weights.
+- 🌊🍃 **[`marimo`](https://marimo.io)** — for interactive experimentation and exploration through notebooks,  
+- 🤗 **[`safetensors`](https://huggingface.co/docs/safetensors)** — for safe and efficient export of trained model weights.
 
