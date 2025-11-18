@@ -1,3 +1,5 @@
+"""Implements Mlp-Mixer."""
+
 import jax.numpy as jnp
 from flax import nnx
 from jax import Array
