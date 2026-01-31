@@ -2,85 +2,35 @@
 
 import typing as tp
 from dataclasses import dataclass
+from functools import partial
 
-import grain
 import jax
 import jax.numpy as jnp
-import orbax.checkpoint as ocp
-from datasets import Dataset
 from flax import nnx
-from flax.typing import Sharding
+from optax import adamw
 from optax.losses import softmax_cross_entropy_with_integer_labels
 
-
-def ckpt_save_args(
-    model_state: tp.Optional[nnx.GraphState] = None,
-    optimizer_state: tp.Optional[nnx.GraphState] = None,
-    data_iterator: tp.Optional[tp.Any] = None,
-    key_state: tp.Optional[jax.Array] = None,
-) -> ocp.args.Composite:
-    """Opiniated checkpoint saver."""
-    args_dict: dict[str, ocp.args.CheckpointArgs] = dict()
-    if model_state:
-        args_dict["model"] = ocp.args.StandardSave(item=model_state)
-
-    if optimizer_state:
-        args_dict["optimizer"] = ocp.args.StandardSave(item=optimizer_state)
-
-    if data_iterator:
-        args_dict["training_set_iterator"] = grain.checkpoint.CheckpointSave(
-            item=data_iterator
-        )
-
-    if key_state:
-        args_dict["key"] = ocp.args.JaxRandomKeySave(item=key_state)
-
-    return ocp.args.Composite(**args_dict)
-
-
-def ckpt_restore_args(
-    model_state: tp.Optional[nnx.GraphState] = None,
-    optimizer_state: tp.Optional[nnx.GraphState] = None,
-    data_iterator: tp.Optional[tp.Any] = None,
-    key_state: tp.Optional[jax.Array] = None,
-) -> ocp.args.Composite:
-    """Opiniated checkpoint manager."""
-    args_dict: dict[str, ocp.args.CheckpointArgs] = dict()
-    if model_state:
-        args_dict["model"] = ocp.args.StandardRestore(item=model_state)
-
-    if optimizer_state:
-        args_dict["optimizer"] = ocp.args.StandardRestore(item=optimizer_state)
-
-    if data_iterator:
-        args_dict["training_set_iterator"] = grain.checkpoint.CheckpointRestore(
-            item=data_iterator
-        )
-
-    if key_state:
-        args_dict["key"] = ocp.args.JaxRandomKeyRestore()
-
-    return ocp.args.Composite(**args_dict)
-
+from paella.train.data import Batch
 
 type ImageClassificationModel = nnx.Sequential
+type State = tuple[ImageClassificationModel, nnx.Optimizer]
 
 
 @dataclass
-class ImageDataSetProperties:
+class ImagesProperties:
     """Properties of the image dataset."""
 
     width: int
-    length: int
+    height: int
     channels: int
     number_of_classes: int
 
 
-def image_classifier(
-    backbone: tp.Callable, props: ImageDataSetProperties, rngs: nnx.Rngs
+def _image_classifier(
+    backbone: tp.Callable, props: ImagesProperties, rngs: nnx.Rngs
 ) -> ImageClassificationModel:
     x = jax.ShapeDtypeStruct(
-        (1, props.width, props.length, props.channels), jnp.float32
+        (1, props.width, props.height, props.channels), jnp.float32
     )
     out_features = jax.eval_shape(backbone, x).shape[1]
     _head = nnx.Linear(
@@ -89,48 +39,48 @@ def image_classifier(
     return nnx.Sequential(backbone, _head)
 
 
-@jax.tree_util.register_dataclass
-@dataclass
-class Batch:
-    """Batch of image and labels."""
+class CNN(nnx.Module):
+    """A simple CNN model."""
 
-    label: jax.Array
-    """Label array."""
+    def __init__(self, *, rngs: nnx.Rngs):
+        self.conv1 = nnx.Conv(1, 32, kernel_size=(3, 3), padding="VALID", rngs=rngs)
+        self.batch_norm1 = nnx.BatchNorm(32, rngs=rngs)
+        self.dropout1 = nnx.Dropout(rate=0.025, rngs=rngs)
+        self.conv2 = nnx.Conv(32, 64, kernel_size=(4, 4), padding="VALID", rngs=rngs)
+        self.batch_norm2 = nnx.BatchNorm(64, rngs=rngs)
+        self.avg_pool = partial(nnx.avg_pool, window_shape=(2, 2), strides=(2, 2))
+        self.linear1 = nnx.Linear(64 * 5 * 5, 128, rngs=rngs)
+        self.dropout2 = nnx.Dropout(rate=0.025, rngs=rngs)
 
-    image: jax.Array
-    """Image array."""
+    def __call__(self, x):
+        x = self.avg_pool(nnx.relu(self.batch_norm1(self.dropout1(self.conv1(x)))))
+        x = self.avg_pool(nnx.relu(self.batch_norm2(self.conv2(x))))
+
+        x = x.reshape(x.shape[0], -1)  # flatten
+
+        x = nnx.relu(self.dropout2(self.linear1(x)))
+        return x
 
 
-def process_image(sample: dict[str, tp.Any]) -> Batch:
-    sample["image"] = (
-        jnp.expand_dims(jnp.array(sample["image"]), -1).astype(jnp.float32) / 255.0
-    )
-    return Batch(**sample)
+def init_state(img_properties: ImagesProperties, *, rngs: nnx.Rngs) -> State:
+    _backbone = CNN(rngs=rngs)
+
+    _backbone.eval()
+
+    model = _image_classifier(backbone=_backbone, props=img_properties, rngs=rngs)
+
+    # optimizer = nnx.Optimizer(
+    #     model, instantiate(conf.gradient_descent.optimizer), wrt=nnx.Param
+    # )
+    learning_rate = 0.005
+    momentum = 0.9
+
+    optimizer = nnx.Optimizer(model, adamw(learning_rate, momentum), wrt=nnx.Param)
+
+    return (model, optimizer)
 
 
-def prepare_dataset(
-    dataset: Dataset,
-    batch_size: int = 32,
-    sharding: tp.Optional[Sharding] = None,
-) -> grain.IterDataset:
-    """Transform an Huggingace dataset into a Grain IterDataset.
-
-    Args:
-        dataset: HuggingFace dataset
-        batch_size: int
-        sharding: Optional Sharding argument
-
-    Returns:
-        IterDataset
-
-    """
-    train_dataset = (
-        grain.MapDataset.source(dataset).shuffle(42).map(process_image).repeat(None)
-    )
-    iter_dataset = train_dataset.to_iter_dataset().batch(batch_size)
-    if sharding:
-        iter_dataset = grain.experimental.device_put(iter_dataset, device=sharding)
-    return iter_dataset
+# StateConf = builds(init_state)
 
 
 def cross_entropy_loss(fun: tp.Callable, batch: Batch) -> tuple[jax.Array, jax.Array]:
@@ -156,13 +106,7 @@ def cross_entropy_loss(fun: tp.Callable, batch: Batch) -> tuple[jax.Array, jax.A
     return loss, logits
 
 
-@nnx.jit
-def train_step(
-    model: ImageClassificationModel,
-    batch: Batch,
-    optimizer: nnx.Optimizer,
-    metrics: nnx.MultiMetric,
-) -> None:
+def single_train_step(state: State, metrics: nnx.MultiMetric, batch: Batch) -> None:
     """Train for a single step.
 
     Args:
@@ -172,17 +116,17 @@ def train_step(
         metrics (nnx.MultiMetric): The metrics of the model.
 
     """
+    model, optimizer = state
     grad_fn = nnx.value_and_grad(cross_entropy_loss, has_aux=True)
     (loss, logits), grads = grad_fn(model, batch)
     metrics.update(loss=loss, logits=logits, labels=batch.label)
     optimizer.update(model, grads)
 
 
-@nnx.jit
-def eval_step(
+def single_eval_step(
     model: ImageClassificationModel,
-    batch: Batch,
     metrics: nnx.MultiMetric,
+    batch: Batch,
 ) -> None:
     """Evaluate the model on the batch."""
     loss, logits = cross_entropy_loss(model, batch)
@@ -194,48 +138,3 @@ def pred_step(model: ImageClassificationModel, images: jax.Array) -> jax.Array:
     """Make predictions on images."""
     logits = model(images)
     return logits.argmax(axis=1)
-
-
-def train_loop(
-    model: nnx.Sequential,
-    train_dataset: grain.DatasetIterator,
-    optimizer: nnx.Optimizer,
-    *,
-    metrics: nnx.MultiMetric,
-    steps: int,
-) -> None:
-    """Train model network on a dataset.
-
-    Args:
-        model: ImageClassificationModel
-            Model to train.
-        train_dataset : Dataset
-            Dataset on which the model will be train.
-        optimizer: nnx.Optimizer
-            Optimizer for minimizing the
-        metrics: nnx.MultiMetric
-            Saving metrics.
-        batch_size: int
-            Size of the batch for the training.
-
-    """
-    # Set the Module in train mode
-    model.train()
-    metrics.reset()
-    for _ in range(steps):
-        train_step(model, next(train_dataset), optimizer, metrics)
-
-
-def eval_loop(
-    model: ImageClassificationModel,
-    dataset_eval: grain.DatasetIterator,
-    *,
-    metrics: nnx.MultiMetric,
-    steps: int,
-) -> None:
-    """Evaluate the module on the dataset."""
-    # Sets the Module to evaluation mode.
-    model.eval()
-    metrics.reset()
-    for _ in range(steps):
-        eval_step(model, next(dataset_eval), metrics)

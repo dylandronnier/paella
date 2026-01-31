@@ -10,7 +10,7 @@ requires-python = ">= 3.13"
 dependencies = [
     "datasets[jax,vision]>=4.2.0",
     "flax>=0.12.0",
-    "grain-nightly>=0.2.13.dev20251006",
+    "grain>=0.2.15",
     "hydra-zen>=0.16.0",
     "jax>=0.7.2",
     "optax>=0.2.6",
@@ -33,6 +33,21 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/paella"]
+
+[dependency-groups]
+dev = [
+    "pyrefly>=0.45.2",
+    "ruff>=0.14.9",
+]
+
+[tool.pyrefly]
+search-path = ["src/paella"]
+project-includes = ["**/*"]
+project-excludes = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/*venv/**/*",
+]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
@@ -89,13 +104,6 @@ select = [
 
 ignore = ["D203", "D213", "D211", "D407"]
 
-[tool.pyrefly]
-project-includes = ["**/*"]
-project-excludes = [
-    "**/node_modules",
-    "**/__pycache__",
-    "**/*venv/**/*",
-]
 
 [tool.ruff.format]
 # Like Black, use double quotes for strings.
@@ -109,11 +117,3 @@ skip-magic-trailing-comma = false
 
 # Like Black, automatically detect the appropriate line ending.
 line-ending = "auto"
-
-[dependency-groups]
-dev = [
-    "marimo[recommended]>=0.17.2",
-    "plotly>=6.3.1",
-    "pyrefly>=0.37.0",
-    "ruff>=0.13.3",
-]
