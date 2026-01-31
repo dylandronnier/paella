@@ -137,9 +137,14 @@ def app(
 
             # Log test metrics
             # log_and_track_metrics(metrics, subset="Validation", run=run, epoch=epoch)
-            saved = ckptr.save_pytree(
-                epoch,
-                TrainingState(model=nnx.state(model), optimizer=nnx.state(optimizer)),
+            saved = ckptr.save_checkpointables_async(
+                step=epoch,
+                checkpointables=dict(
+                    model=nnx.state(model),
+                    optimizer=nnx.state(optimizer),
+                    data_train=train_iterator,
+                    data_test=eval_iterator,
+                ),
                 metrics=dict(training=train_metrics, validation=eval_metrics),
             )
 
