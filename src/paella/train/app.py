@@ -3,10 +3,8 @@
 # import logging
 import sys
 import typing as tp
-from dataclasses import dataclass
 
 import grain
-import jax
 import toolz
 import tqdm
 from absl import logging
@@ -23,19 +21,11 @@ from paella.train.lib import (
     single_eval_step,
     single_train_step,
 )
+from paella.utils import number_of_parameters
 
 training = ocp.training
 
 EarlyStoppingConf = builds(EarlyStopping)
-
-logging.set_verbosity(logging.ERROR)
-
-
-@jax.tree_util.register_dataclass
-@dataclass
-class TrainingState:
-    model: nnx.State
-    optimizer: nnx.State
 
 
 @store(name="train", dataset=DataConf)
@@ -43,7 +33,8 @@ def app(
     dataset: tuple[grain.IterDataset, grain.IterDataset],
     ckpt_directory: Path,
     earlystopconf: tp.Optional[EarlyStoppingConf] = None,
-    epochs: int = 20,
+    number_of_steps: int = 960,
+    step_size: int = 20,
     seed: int = 42,
 ) -> None:
     """Train a model on a dataset.
@@ -63,6 +54,7 @@ def app(
     img_props = ImagesProperties(width=28, height=28, channels=1, number_of_classes=10)
 
     (model, optimizer) = init_state(img_properties=img_props, rngs=rngs)
+    print(number_of_parameters(model))
     # Save model architecture in AIM
     # run["model"] = {"nb_parameters": number_of_parameters(mod)}
 
@@ -103,63 +95,62 @@ def app(
         mod, met = s
         return s, single_eval_step(mod, met, dat)
 
-    train_iterator = iter(iter_dataset_train)
-    eval_iterator = iter(iter_dataset_test)
+    train_iterator = iter(iter_dataset_train.batch(step_size))
+    eval_iterator = iter(iter_dataset_test.batch(step_size))
 
     model.train()
     with training.Checkpointer(
         ckpt_directory, preservation_policy=preservation_policy
     ) as ckptr:
-        for epoch in (prog := tqdm.tqdm(range(1, epochs + 1))):
+        for step in (prog := tqdm.trange(1, number_of_steps + 1, step_size)):
             # Training loop
 
-            metrics.reset()
             train_loop(((model, optimizer), metrics), next(train_iterator))
 
-            train_metrics = toolz.valmap(float, metrics.compute())
+            if (step - 1) % (step_size * 7) == 6 * step_size:
+                train_metrics = toolz.valmap(float, metrics.compute())
+                metrics.reset()
+                model.eval()
+                for _ in range(3):
+                    eval_loop((model, metrics), next(eval_iterator))
 
-            # Log training metrics
-            # log_and_track_metrics(metrics, subset="Train", run=run, epoch=epoch)
+                eval_metrics = toolz.valmap(float, metrics.compute())
+                metrics.reset()
 
-            # Reset metrics for test set
-            # metrics.reset()
-
-            # Evaluation loop
-
-            model.eval()
-            metrics.reset()
-            eval_loop((model, metrics), next(eval_iterator))
-            model.train()
-
-            eval_metrics = toolz.valmap(float, metrics.compute())
-
-            prog.set_postfix_str(f"Accuracy={eval_metrics['accuracy']:.4f}")
-
-            # Log test metrics
-            # log_and_track_metrics(metrics, subset="Validation", run=run, epoch=epoch)
-            saved = ckptr.save_checkpointables_async(
-                step=epoch,
-                checkpointables=dict(
-                    model=nnx.state(model),
-                    optimizer=nnx.state(optimizer),
-                    data_train=train_iterator,
-                    data_test=eval_iterator,
-                ),
-                metrics=dict(training=train_metrics, validation=eval_metrics),
-            )
-
-            if saved:  # Will be True if the save_decision_policy decided to save.
-                logging.info(f"  Saved checkpoint for step {epoch}...")
-
-            early_stop = early_stop.update(eval_metrics["loss"])
-
-            if early_stop.should_stop:
-                logging.warning(
-                    "No improvments of the evaluation loss during"
-                    + f" the last {early_stop.patience} epochs."
+                # prog.set_postfix_str(f"Accuracy={eval_metrics['accuracy']:.4f}")
+                prog.set_postfix(
+                    val_accuracy=f"{eval_metrics['accuracy']:.4f}",
+                    train_accuracy=f"{train_metrics['accuracy']:.4f}",
                 )
-                logging.warning(f"Could not reach epoch {epochs}.")
-                break
+
+                # Log test metrics
+                # log_and_track_metrics(metrics, subset="Validation", run=run, epoch=epoch)
+                saved = ckptr.save_checkpointables_async(
+                    step=step,
+                    checkpointables=dict(
+                        model=nnx.state(model),
+                        optimizer=nnx.state(optimizer),
+                        data_train=train_iterator,
+                        data_test=eval_iterator,
+                    ),
+                    metrics=dict(training=train_metrics, validation=eval_metrics),
+                )
+
+                model.train()
+
+                if saved:  # Will be True if the save_decision_policy decided to save.
+                    logging.info(f"Saved checkpoint for step {step}...")
+
+                early_stop = early_stop.update(eval_metrics["loss"])
+
+                if early_stop.should_stop:
+                    logging.warning(
+                        "No improvments of the evaluation loss during"
+                        + f" the last {early_stop.patience} epochs."
+                    )
+                    logging.warning(f"Could not reach epoch {step}.")
+
+                    break
 
             # metrics.reset()  # reset metrics for next training epoch
 

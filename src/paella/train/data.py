@@ -32,7 +32,6 @@ def prepare_dataset(
     dataset: Dataset,
     *,
     batch_size: int = 32,
-    step_size: tp.Optional[int] = None,
     sharding: tp.Optional[jax.sharding.Sharding] = None,
 ) -> grain.IterDataset:
     """Transform an Huggingace dataset into a Grain IterDataset.
@@ -51,9 +50,6 @@ def prepare_dataset(
     )
     iter_dataset = train_dataset.to_iter_dataset().batch(batch_size)
 
-    if step_size:
-        iter_dataset = iter_dataset.batch(step_size)
-
     if sharding:
         iter_dataset = grain.experimental.device_put(iter_dataset, device=sharding)
     return iter_dataset
@@ -63,7 +59,6 @@ def dataset_from_hf(
     hf_id: str,
     *,
     batch_size: int,
-    step_size: tp.Optional[int] = None,
     image_column_name: str = "image",
 ) -> tuple[grain.IterDataset, grain.IterDataset]:
     # Load dataset
@@ -79,12 +74,8 @@ def dataset_from_hf(
         hf_dataset = hf_dataset.rename_column(image_column_name, "image")
 
     # Load the data in the GPU
-    iter_dataset_train = prepare_dataset(
-        hf_dataset["train"], batch_size=batch_size, step_size=step_size
-    )
-    iter_dataset_test = prepare_dataset(
-        hf_dataset["test"], batch_size=batch_size, step_size=step_size
-    )
+    iter_dataset_train = prepare_dataset(hf_dataset["train"], batch_size=batch_size)
+    iter_dataset_test = prepare_dataset(hf_dataset["test"], batch_size=batch_size)
 
     logging.info(msg=f"The dataset {hf_id} has been preprocessed. Ready to learn.")
 

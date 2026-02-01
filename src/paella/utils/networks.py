@@ -1,7 +1,9 @@
 from flax import nnx
 from jax.tree_util import tree_leaves
+from numpy import prod
 
 
 def number_of_parameters(mod: nnx.Module) -> int:
     """Compute the number of parameters in the model."""
-    return sum(p.size for p in tree_leaves(nnx.split(mod)[1]))
+    params = nnx.state(mod, nnx.Param)
+    return sum(prod(p.shape) for p in tree_leaves(params))
